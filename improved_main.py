@@ -27,16 +27,8 @@ app = FastAPI(
 print("🔄 Loading improved text model...")
 text_tokenizer = DistilBertTokenizer.from_pretrained("distilbert-base-uncased")
 
-# Load model checkpoint
-text_checkpoint = torch.load("improved_text_disease_model.pth", map_location="cpu")
-text_model = ImprovedPetDiseaseTextClassifier(
-    num_species=3, 
-    num_diseases=16,
-    dropout=0.3
-)
-text_model.load_state_dict(text_checkpoint['model_state_dict'])
-text_model.eval()
-
+# Initialize text model variables
+text_model = None
 text_species_mapping = {0: "Cat", 1: "Dog", 2: "Fish"}
 text_disease_mapping = {
     0: "cat_ringworm", 1: "cat_scabies", 2: "dermatitis", 3: "fine", 4: "flea_allergy",
@@ -46,19 +38,51 @@ text_disease_mapping = {
     13: "Healthy Fish", 14: "Parasitic diseases", 15: "Viral White disease diseases tail"
 }
 
+# Try to load text model checkpoint
+try:
+    text_checkpoint = torch.load("improved_text_disease_model.pth", map_location="cpu")
+    text_model = ImprovedPetDiseaseTextClassifier(
+        num_species=3, 
+        num_diseases=16,
+        dropout=0.3
+    )
+    text_model.load_state_dict(text_checkpoint['model_state_dict'])
+    text_model.eval()
+    print("✅ Text model loaded successfully")
+except FileNotFoundError:
+    print("⚠️  Text model file not found - text prediction will be disabled")
+    text_model = None
+except Exception as e:
+    print(f"⚠️  Error loading text model: {e} - text prediction will be disabled")
+    text_model = None
+
 # ---------- IMAGE MODEL SETUP ----------
 print("🔄 Loading improved image model...")
 data_dir = "dataset"
-disease_class_mapping = get_disease_classes(os.path.join(data_dir, "train"))
-image_disease_mapping = [k for k, _ in sorted(disease_class_mapping.items(), key=lambda x: x[1])]
+
+# Initialize image model variables
+image_model = None
+image_disease_mapping = []
 image_species_mapping = {0: "Dog", 1: "Cat", 2: "Fish"}
 
-# Load model checkpoint
-image_checkpoint = torch.load("best_multi_pet_disease_model.pth", map_location="cpu")
-image_model = SimpleMultiPetDiseaseModel(num_diseases=len(image_disease_mapping))
-image_model.load_state_dict(image_checkpoint, strict=False)
-image_model.eval()
+# Try to load image model checkpoint
+try:
+    disease_class_mapping = get_disease_classes(os.path.join(data_dir, "train"))
+    image_disease_mapping = [k for k, _ in sorted(disease_class_mapping.items(), key=lambda x: x[1])]
+    
+    image_checkpoint = torch.load("best_multi_pet_disease_model.pth", map_location="cpu")
+    image_model = SimpleMultiPetDiseaseModel(num_diseases=len(image_disease_mapping))
+    image_model.load_state_dict(image_checkpoint, strict=False)
+    image_model.eval()
+    print("✅ Image model loaded successfully")
+except FileNotFoundError:
+    print("⚠️  Image model file not found - image prediction will be disabled")
+    image_model = None
+except Exception as e:
+    print(f"⚠️  Error loading image model: {e} - image prediction will be disabled")
+    image_model = None
 
+# Initialize image transform
 image_transform = transforms.Compose([
     transforms.Resize((224, 224)),
     transforms.ToTensor(),
@@ -141,6 +165,13 @@ def get_top_predictions(probs, mapping, top_k=3):
 async def predict_text(payload: TextInput):
     """Predict pet disease from text symptoms"""
     try:
+        # Check if text model is loaded
+        if text_model is None:
+            raise HTTPException(
+                status_code=503, 
+                detail="Text prediction model is not available. Please check if the model file is properly loaded."
+            )
+        
         # Preprocess text
         text = payload.text.strip()
         if not text:
@@ -180,6 +211,13 @@ SPECIES_WARNING_THRESHOLD = 0.8     # Warn if below 80%
 async def predict_image(file: UploadFile = File(...)):
     """Predict pet disease from image, with robust animal filtering using ImageNet classifier and dataset whitelist"""
     try:
+        # Check if image model is loaded
+        if image_model is None:
+            raise HTTPException(
+                status_code=503, 
+                detail="Image prediction model is not available. Please check if the model file is properly loaded."
+            )
+        
         # Validate file
         if not file.content_type.startswith('image/'):
             raise HTTPException(status_code=400, detail="File must be an image")
@@ -237,8 +275,8 @@ async def health_check():
     return {
         "status": "healthy",
         "models_loaded": {
-            "text_model": True,
-            "image_model": True
+            "text_model": text_model is not None,
+            "image_model": image_model is not None
         },
         "version": "2.0.0"
     }
@@ -249,28 +287,30 @@ async def model_info():
     """Get information about the loaded models"""
     return {
         "text_model": {
-            "architecture": "ImprovedPetDiseaseTextClassifier",
-            "base_model": "DistilBERT",
-            "species_classes": list(text_species_mapping.values()),
-            "disease_classes": list(text_disease_mapping.values()),
+            "loaded": text_model is not None,
+            "architecture": "ImprovedPetDiseaseTextClassifier" if text_model else "Not loaded",
+            "base_model": "DistilBERT" if text_model else "N/A",
+            "species_classes": list(text_species_mapping.values()) if text_model else [],
+            "disease_classes": list(text_disease_mapping.values()) if text_model else [],
             "features": [
                 "Multi-head attention",
-                "Feature fusion",
+                "Feature fusion", 
                 "Focal loss",
                 "Advanced text preprocessing"
-            ]
+            ] if text_model else ["Model not loaded"]
         },
         "image_model": {
-            "architecture": "SimpleMultiPetDiseaseModel",
-            "base_model": "EfficientNet-B0",
-            "species_classes": list(image_species_mapping.values()),
-            "disease_classes": image_disease_mapping,
+            "loaded": image_model is not None,
+            "architecture": "SimpleMultiPetDiseaseModel" if image_model else "Not loaded",
+            "base_model": "EfficientNet-B0" if image_model else "N/A",
+            "species_classes": list(image_species_mapping.values()) if image_model else [],
+            "disease_classes": image_disease_mapping if image_model else [],
             "features": [
                 "Multi-scale feature extraction",
-                "Attention modules",
-                "Label smoothing",
-                "Advanced augmentation"
-            ]
+                "Attention mechanisms",
+                "Advanced augmentation",
+                "Robust animal filtering"
+            ] if image_model else ["Model not loaded"]
         }
     }
 
